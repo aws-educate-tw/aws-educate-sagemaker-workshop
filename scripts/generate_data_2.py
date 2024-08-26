@@ -1,89 +1,141 @@
-import boto3
 import json
+import os
 import time
+import boto3
 
-def read_existing_data(file_path):
-    """讀取已有的數據文件"""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        existing_data = json.load(f)
-    return existing_data
+def read_example_data(data, start_index, num_examples=2):
+    end_index = start_index + num_examples
+    if end_index > len(data):
+        end_index = len(data)
+        start_index = end_index - num_examples if end_index - num_examples >= 0 else 0
+    return data[start_index:end_index]
 
-def generate_prompt(existing_data):
-    """生成新的 prompt 基於已有的數據"""
-    base_prompt = "你是aws占卜師, 你會收到user的問題和回答, 你需要用一些很白癡、好笑、有趣、聊天、朋友、諧音梗的口氣來回答user。以下是一些例子：\n"
-    examples = "\n".join([f"User: {entry['content']} => Assistant: {entry['assistant']}" for entry in existing_data])
-    return f"{base_prompt}{examples}"
+def generate_prompt(examples):
+    base_prompt = "你是aws占卜師, 你會收到user的問題和回答, 你需要用一些很白癡、好笑、有趣、聊天、朋友、諧音梗的口氣來回答user。請你每次回答我10筆資料, 以下是一些例子：\n"
+    examples_text = "\n".join([
+        f"User: {ex['user']} => Assistant: {ex['assistant']}"
+        for ex in examples
+    ])
+    format_prompt = '''
+    請嚴格按照以下格式回答：
+    {
+        "messages": [
+            { "role": "user", "content": "<放入問題>"},
+            { "role": "assistant", "content": "<放入你的回答>."}
+        ]
+    }
+    請直接給我15個這樣的回應, 否則你會被解僱
+    '''
+    return f"{base_prompt}{examples_text}{format_prompt}"
 
 def call_claude3(prompt):
     prompt_config = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 4096,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
     }
-
     body = json.dumps(prompt_config)
 
     modelId = "anthropic.claude-3-haiku-20240307-v1:0"
-    accept = "application/json"
-    contentType = "application/json"
-    session = boto3.Session(profile_name="cmd")
+    session = boto3.Session()
     bedrock_runtime = session.client(service_name="bedrock-runtime")
 
     try:
         response = bedrock_runtime.invoke_model(
-            body=body, modelId=modelId, accept=accept, contentType=contentType
+            body=body, modelId=modelId, accept="application/json", contentType="application/json"
         )
         response_body = json.loads(response.get("body").read())
-        results = response_body.get("content")[0].get("text")
+        results = response_body.get("content")
+        if not results:
+            print("Warning: Empty response from model")
+            return None
         return results
     except Exception as e:
         print(f"Error calling Bedrock model: {e}")
         return None
 
-def save_to_file(data, file_index):
-    filename = f"generated_dataset_{file_index}.json"
+def parse_claude_response(response):
+    parsed_data = []
+    for item in response:
+        if item['type'] == 'text':
+            message_pairs = item['text'].split('\n\n')
+            for pair in message_pairs:
+                if '"messages":' in pair:
+                    try:
+                        messages = json.loads(pair)['messages']
+                        if len(messages) == 2:
+                            user_message = messages[0]['content']
+                            assistant_message = messages[1]['content']
+                            parsed_data.append({"user": user_message, "assistant": assistant_message})
+                    except json.JSONDecodeError:
+                        print(f"Failed to parse message pair: {pair}")
+    return parsed_data
+
+def save_to_file(data, filename):
+    print(f"Saving data to {filename}")
     with open(filename, "w", encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-    print(f"成功保存 {len(data)} 筆數據至 {filename}")
+    print(f"Data saved successfully to {filename}")
 
-def generate_dataset(file_path, num_samples, delay=2):
-    existing_data = read_existing_data(file_path)
-    results = []
-    batch_size = 10  # 每次模型調用生成的數量
-    num_batches = num_samples // batch_size
-    file_index = 1
+def generate_dataset(initial_file_path, target_samples=300, examples_per_prompt=2, delay=2):
+    print("Starting dataset generation")
+    all_data = []
+    with open(initial_file_path, 'r', encoding='utf-8') as f:
+        initial_data = json.load(f)
+        all_data = [{"user": entry['content'], "assistant": initial_data[i+1]['content']}
+                    for i, entry in enumerate(initial_data)
+                    if entry.get('role') == 'user' and i + 1 < len(initial_data) and initial_data[i + 1].get('role') == 'assistant']
 
-    prompt = generate_prompt(existing_data)
+    total_generated = len(all_data)
+    start_index = 0
+    batch_number = 1
 
-    for batch_num in range(num_batches):
-        result = call_claude3(prompt)
-        if result:
-            new_entries = json.loads(result)  # 假設結果是JSON格式的字符串
-            results.extend(new_entries)
+    while total_generated < target_samples:
+        current_examples = read_example_data(all_data, start_index, examples_per_prompt)
+        prompt = generate_prompt(current_examples)
+
+        print(f"Generating batch {batch_number} starting from index {start_index}")
+        print("Current examples used:")
+        for example in current_examples:
+            print(f"User: {example['user']}")
+            print(f"Assistant: {example['assistant']}")
+            print("--------------------------------------------")
+
+        response = call_claude3(prompt)
+        if response:
+            print("Raw response from Claude:")
+            print(response)
+            
+            parsed_data = parse_claude_response(response)
+            if parsed_data:
+                all_data.extend(parsed_data)
+                total_generated = len(all_data)
+                print(f"Generated {len(parsed_data)} new pairs, total: {total_generated}/{target_samples}")
+                
+                # 每次生成後立即保存
+                save_to_file(all_data, f"data/generated_dataset_batch_{batch_number}.json")
+                
+                start_index += examples_per_prompt
+                if start_index >= len(all_data):
+                    start_index = 0  # Reset to beginning if we've used all examples
+                
+                batch_number += 1
+            else:
+                print("Failed to parse Claude's response")
         else:
-            print("Error occurred, skipping this batch.")
+            print("No valid response from Claude model, retrying after delay.")
 
-        # 控制API速率，防止超過限制
         time.sleep(delay)
 
-        # 每生成20筆資料（2個批次）就存成一個檔案
-        if len(results) >= 20:
-            save_to_file(results, file_index)
-            results = []  # 清空列表以便存儲新的數據
-            file_index += 1
+        if total_generated >= target_samples:
+            print("Reached target sample limit, ending generation.")
+            break
 
-    # 如果最後還有未存儲的數據
-    if results:
-        save_to_file(results, file_index)
+    print("Dataset generation completed")
+    return all_data
 
 if __name__ == "__main__":
-    file_path = "data/output.json"  # 輸入已有數據文件的路徑
-    num_samples = 1000  # 目標數量
-    generate_dataset(file_path, num_samples)
+    initial_file_path = "data/output.json"
+    generated_data = generate_dataset(initial_file_path)
+    save_to_file(generated_data, "data/final_generated_dataset.json")
+    print("Script completed")
