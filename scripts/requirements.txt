@@ -1,8 +1,9 @@
-transformers==4.34.0
+transformers==4.44.0
 datasets==2.14.0
-peft==0.4.0
-accelerate==0.23.0
+peft==0.10.0
+accelerate==0.33.0
 bitsandbytes==0.41.1
-safetensors>=0.3.3
+safetensors==0.4.1
+dill<0.3.8,>=0.3.0
 packaging
 ninja
