@@ -36,8 +36,8 @@ def call_claude3(prompt):
     }
     body = json.dumps(prompt_config)
 
-    modelId = "anthropic.claude-3-haiku-20240307-v1:0"
-    session = boto3.Session()
+    modelId = "anthropic.claude-3-haiku-20240307-v1:0" # 3.5-sonnet
+    session = boto3.Session(profile_name="cmd")
     bedrock_runtime = session.client(service_name="bedrock-runtime")
 
     try:
@@ -69,6 +69,7 @@ def parse_claude_response(response):
                             parsed_data.append({"user": user_message, "assistant": assistant_message})
                     except json.JSONDecodeError:
                         print(f"Failed to parse message pair: {pair}")
+                        'raw message: xxx \n \n xxx'
     return parsed_data
 
 def save_to_file(data, filename):
