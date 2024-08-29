@@ -384,4 +384,6 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# hugging face model
+models/
 # End of https://www.toptal.com/developers/gitignore/api/node,python,linux,macos,windows
