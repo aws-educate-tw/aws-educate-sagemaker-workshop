@@ -92,8 +92,14 @@ def training_function(script_args, training_args):
     config.use_flash_attention_2 = script_args.use_flash_attn
 
     # Load dataset
-    dataset = load_from_disk(script_args.dataset_path)
-
+    train_dataset = load_dataset_from_json(f"{script_args.dataset_path}/train_dataset.json")
+    test_dataset = load_dataset_from_json(f"{script_args.dataset_path}/test_dataset.json")
+    
+    dataset = DatasetDict({
+        'train': train_dataset,
+        'test': test_dataset
+    })
+    
     # Load model from the hub with a bnb config
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
