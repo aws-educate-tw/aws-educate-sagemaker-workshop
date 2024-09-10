@@ -1,18 +1,17 @@
-from dataclasses import dataclass, field
 import os
 import sys
 import subprocess
-from transformers import AutoConfig
+import json
+from dataclasses import dataclass, field
 from typing import Optional
 
-# Upgrade flash attention and install required packages
-try:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "flash-attn", "--no-build-isolation", "--upgrade"])
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", "requirements.txt"])
-except:
-    print("flash-attn failed to install")
+import torch
+from torch.utils.data import Dataset as TorchDataset
 
+import bitsandbytes as bnb
+from huggingface_hub import login
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
     set_seed,
@@ -22,13 +21,48 @@ from transformers import (
     TrainingArguments,
     HfArgumentParser,
 )
-from datasets import load_from_disk
-import torch
+from datasets import load_dataset, DatasetDict, Dataset
 
-import bitsandbytes as bnb
-from huggingface_hub import login
+# Attempt to upgrade and install required packages
+try:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "flash-attn", "--no-build-isolation", "--upgrade"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", "requirements.txt"])
+except:
+    print("Failed to install flash-attn")
 
+# Custom dataset class for handling input data
+class CustomDataset(TorchDataset):
+    def __init__(self, dataset, tokenizer, max_length):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        input_text = item.get('input', item.get('text', ''))
+        output_text = item.get('output', '')
+        
+        full_text = f"{input_text}\n{output_text}".strip()
+        
+        encoding = self.tokenizer(full_text,
+                                  truncation=True,
+                                  max_length=self.max_length,
+                                  padding="max_length",
+                                  return_tensors="pt")
+        
+        input_ids = encoding["input_ids"].squeeze()
+        attention_mask = encoding["attention_mask"].squeeze()
+        
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": input_ids.clone()
+        }
+
+# Function to find all linear layer names in the model
 def find_all_linear_names(model):
     lora_module_names = set()
     for name, module in model.named_modules():
@@ -40,7 +74,7 @@ def find_all_linear_names(model):
         lora_module_names.remove("lm_head")
     return list(lora_module_names)
 
-
+# Function to create a PEFT (Parameter-Efficient Fine-Tuning) model
 def create_peft_model(model, gradient_checkpointing=True, bf16=True):
     from peft import (
         get_peft_model,
@@ -50,15 +84,16 @@ def create_peft_model(model, gradient_checkpointing=True, bf16=True):
     )
     from peft.tuners.lora import LoraLayer
 
-    # Prepare int-4 model for training
+    # Prepare model for k-bit training
     model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=gradient_checkpointing)
     if gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
-    # Get LoRA target modules
+    # Find modules to quantize
     modules = find_all_linear_names(model)
     print(f"Found {len(modules)} modules to quantize: {modules}")
 
+    # Configure LoRA
     peft_config = LoraConfig(
         r=64,
         lora_alpha=16,
@@ -68,39 +103,98 @@ def create_peft_model(model, gradient_checkpointing=True, bf16=True):
         task_type=TaskType.CAUSAL_LM,
     )
 
+    # Get PEFT model
     model = get_peft_model(model, peft_config)
 
-    # Upcast the layer norms in float 32
+    # Adjust model parameters
     for name, module in model.named_modules():
         if isinstance(module, LoraLayer):
-            pass  # Leave the Lora layers as they are
+            pass
         elif "norm" in name:
             module.to(torch.float32)
         elif "lm_head" in name or "embed_tokens" in name:
             if hasattr(module, "weight"):
-                pass  # Leave embedding layers as they are
+                pass
         else:
-            pass  # Leave all other modules as they are
+            pass
 
     model.print_trainable_parameters()
     return model
 
+# Function to manually load dataset from JSON files
+def load_dataset_manually(dataset_path):
+    print(f"Attempting to load dataset from: {dataset_path}")
+    try:
+        train_file = os.path.join(dataset_path, "train_dataset.json")
+        test_file = os.path.join(dataset_path, "test_dataset.json")
+        
+        def load_json_file(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return Dataset.from_list(data)
+        
+        dataset = DatasetDict({
+            'train': load_json_file(train_file),
+            'test': load_json_file(test_file)
+        })
+        
+        print(f"Loaded dataset with splits: {dataset.keys()}")
+        for split, data in dataset.items():
+            print(f"{split} split has {len(data)} samples")
+        
+        return dataset
+    except Exception as e:
+        print(f"Error loading dataset: {str(e)}")
+        raise
 
+# Main training function
 def training_function(script_args, training_args):
+    # Load model configuration
     config = AutoConfig.from_pretrained(script_args.model_id)
     config.use_flash_attention = script_args.use_flash_attn
     config.use_flash_attention_2 = script_args.use_flash_attn
 
-    # Load dataset
-    train_dataset = load_dataset_from_json(f"{script_args.dataset_path}/train_dataset.json")
-    test_dataset = load_dataset_from_json(f"{script_args.dataset_path}/test_dataset.json")
+    # Load and process dataset
+    print(f"Contents of {script_args.dataset_path}:")
+    for item in os.listdir(script_args.dataset_path):
+        print(item)
+
+    try:
+        print("Attempting to load dataset...")
+        dataset_dict = load_dataset_manually(script_args.dataset_path)
+        print("Successfully loaded dataset")
+        
+        print(f"Dataset splits: {dataset_dict.keys()}")
+        
+        if 'train' not in dataset_dict:
+            raise KeyError("No 'train' split found in the dataset")
+        
+        raw_dataset = dataset_dict['train']
+        print(f"Using 'train' split with {len(raw_dataset)} samples")
+        
+        if len(raw_dataset) == 0:
+            raise ValueError("Training dataset is empty")
+        
+    except Exception as e:
+        print(f"Error loading or processing dataset: {str(e)}")
+        raise
+
+    print(f"Dataset info: {raw_dataset}")
     
-    dataset = DatasetDict({
-        'train': train_dataset,
-        'test': test_dataset
-    })
-    
-    # Load model from the hub with a bnb config
+    print("First few samples of the dataset:")
+    for i, sample in enumerate(raw_dataset.select(range(min(5, len(raw_dataset))))):
+        print(f"Sample {i}:")
+        print(json.dumps(sample, indent=2))
+        print()
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(script_args.model_id, padding_side="left")
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Create custom dataset
+    dataset = CustomDataset(raw_dataset, tokenizer, max_length=512)  # Adjust max_length as needed
+
+    # Configure quantization
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -108,6 +202,7 @@ def training_function(script_args, training_args):
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
+    # Load pre-trained model
     model = AutoModelForCausalLM.from_pretrained(
         script_args.model_id,
         device_map="auto",
@@ -121,7 +216,7 @@ def training_function(script_args, training_args):
         model, gradient_checkpointing=training_args.gradient_checkpointing, bf16=training_args.bf16
     )
 
-    # Create Trainer instance
+    # Initialize trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -132,6 +227,7 @@ def training_function(script_args, training_args):
     # Start training
     trainer.train()
 
+    # Save the model
     sagemaker_save_dir = "/opt/ml/model/"
     if script_args.merge_adapters:
         trainer.model.save_pretrained(training_args.output_dir, safe_serialization=False)
@@ -151,11 +247,9 @@ def training_function(script_args, training_args):
     else:
         trainer.model.save_pretrained(sagemaker_save_dir, safe_serialization=True)
 
-    # Save tokenizer for easy inference
-    tokenizer = AutoTokenizer.from_pretrained(script_args.model_id, padding_side="left")
     tokenizer.save_pretrained(sagemaker_save_dir)
 
-
+# Define script arguments
 @dataclass
 class ScriptArguments:
     model_id: str = field(
@@ -181,21 +275,23 @@ class ScriptArguments:
         default=False,
     )
 
-
+# Main function
 def main():
+    # Parse arguments
     parser = HfArgumentParser([ScriptArguments, TrainingArguments])
     script_args, training_args = parser.parse_args_into_dataclasses()
     training_args.bf16 = False
     training_args.fp16 = True
     set_seed(training_args.seed)
 
+    # Login to Hugging Face Hub if token is provided
     token = os.environ.get("HF_TOKEN") or script_args.hf_token
     if token:
         print(f"Logging into the Hugging Face Hub with token {token[:10]}...")
         login(token=token)
 
+    # Start training
     training_function(script_args, training_args)
-
 
 if __name__ == "__main__":
     main()
