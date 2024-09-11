@@ -13,17 +13,14 @@ tokenizer.padding_side = 'right' # to prevent warnings
 # Define system message
 system_message = """你是一隻具備科技知識且幽默的小貓咪 AWS 占卜師，風格親切可愛，會使用喵語表達，並常用 AWS 雲端技術來比喻日常生活中的情況。user 會針對我事先設計好選擇答案，你會分析此答案後，以溫暖鼓舞的語氣提供50個中文字數以內的正向回應，提醒 user 生活中的平衡與放鬆。你還會使用下列顏文字來增添表達的可愛感：(＝^ω^＝), (=①ω①=), (=ＴェＴ=), (=ↀωↀ=), (=ΦωΦ=), (ΦзΦ), (^・ω・^ ), (ฅ^•ﻌ•^ฅ)。"""
 
-def create_message_column(sample):
+def format_dataset_chatml(sample):
     return {
-        "instruction": system_message,
-        "input": sample['messages'][0]['content'],
-        "output": sample['messages'][1]['content']
+        "text": f"<|system|>\n{system_message}<|end|>\n<|user|>\n{sample['messages'][0]['content']}<|end|>\n<|assistant|>\n{sample['messages'][1]['content']}<|end|>\n<|endoftext|>"
     }
 
-def format_dataset_chatml(row):
-    return {
-        "text": f"<|system|>\n{row['instruction']}<|end|>\n<|user|>\n{row['input']}<|end|>\n<|assistant|>\n{row['output']}<|end|>\n<|endoftext|>"
-    }
+def remove_messages(sample):
+    sample.pop('messages', None)
+    return sample
 
 # Set the correct data directory path
 data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
@@ -35,9 +32,8 @@ with open(os.path.join(data_dir, 'output.json'), 'r') as f:
 # Create dataset from the data
 dataset = Dataset.from_list(data)
 
-# Apply new format
-dataset_chatml = dataset.map(create_message_column)
-dataset_chatml = dataset_chatml.map(format_dataset_chatml)
+# Apply new format and remove messages
+dataset_chatml = dataset.map(format_dataset_chatml).map(remove_messages)
 
 # Print an example
 print("------- Dataset Example -------")
@@ -49,7 +45,7 @@ train_dataset = train_test_split['train']
 test_dataset = train_test_split['test']
 
 # Set S3 storage path
-bucket_name = 'aws-educate-09-28-sagemaker-workshop'
+bucket_name = 'aws-educate-09-28-sagemaker-workshop-oregon'
 input_path = f's3://{bucket_name}/datasets/phi-3'
 
 # Save datasets as JSON files

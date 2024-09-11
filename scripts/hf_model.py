@@ -17,13 +17,13 @@ logger.setLevel(logging.INFO)
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 logger.info(f"Hugging Face Token: {HF_TOKEN}")
 
-s3_bucket = "aws-educate-09-28-sagemaker-workshop"
-s3_prefix = "model/mistral/"
+s3_bucket = "aws-educate-09-28-sagemaker-workshop-oregon"
+s3_prefix = "models/phi-3.5-mini-instruct"
 
 # Download the model from Hugging Face to the specified directory
-target_directory = "models/stablelm-2-zephyr-1_6b"
+target_directory = "models/phi-3.5-mini-instruct"
 os.makedirs(target_directory, exist_ok=True)
 logger.info("Starting download...")
 
-model_path = snapshot_download(repo_id="stabilityai/stablelm-2-zephyr-1_6b", repo_type="model", local_dir=target_directory)
+model_path = snapshot_download(repo_id="microsoft/Phi-3.5-mini-instruct", repo_type="model", local_dir=target_directory)
 logger.info(f"Model downloaded to {model_path}")
