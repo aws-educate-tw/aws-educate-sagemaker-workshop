@@ -23,7 +23,7 @@ def call_claude3(prompt):
     modelId = "anthropic.claude-3-haiku-20240307-v1:0"
     accept = "application/json"
     contentType = "application/json"
-    # session = boto3.Session(profile_name="cmd")
+    session = boto3.Session(profile_name="cmd")
     session = boto3.Session()
     bedrock_runtime = session.client(service_name="bedrock-runtime")
 
@@ -74,3 +74,4 @@ if __name__ == "__main__":
     prompt = get_prompt("prompt/prompt.txt")
     num_samples = 1000 
     generate_dataset(prompt, num_samples)
+
