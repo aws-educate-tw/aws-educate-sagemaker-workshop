@@ -220,7 +220,8 @@ def training_function(script_args, training_args):
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=dataset['train'],
+        eval_dataset=dataset['test'],
         data_collator=default_data_collator,
     )
 
