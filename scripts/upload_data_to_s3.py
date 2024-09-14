@@ -46,7 +46,7 @@ test_dataset = train_test_split['test']
 
 # Set S3 storage path
 bucket_name = 'aws-educate-09-28-sagemaker-workshop-oregon'
-input_path = f's3://{bucket_name}/datasets/phi-3.5-mini-instruct'
+input_path = f's3://{bucket_name}/datasets/phi-3.5-mini-instruct/workshop'
 
 # Save datasets as JSON files
 with open(os.path.join(data_dir, 'train_dataset.json'), 'w', encoding='utf-8') as f:
@@ -59,8 +59,8 @@ with open(os.path.join(data_dir, 'test_dataset.json'), 'w', encoding='utf-8') as
 s3 = boto3.client('s3')
 
 # Upload files to S3
-s3.upload_file(os.path.join(data_dir, 'train_dataset.json'), bucket_name, 'datasets/phi-3.5-mini-instruct/train_dataset.json')
-s3.upload_file(os.path.join(data_dir, 'test_dataset.json'), bucket_name, 'datasets/phi-3.5-mini-instruct/test_dataset.json')
+s3.upload_file(os.path.join(data_dir, 'train_dataset.json'), bucket_name, 'datasets/phi-3.5-mini-instruct/workshop/train_dataset.json')
+s3.upload_file(os.path.join(data_dir, 'test_dataset.json'), bucket_name, 'datasets/phi-3.5-mini-instruct/workshop/test_dataset.json')
 
 # Print upload information
 print(f"Training data uploaded to: {bucket_name}")
