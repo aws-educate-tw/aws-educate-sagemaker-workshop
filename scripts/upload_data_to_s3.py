@@ -21,8 +21,8 @@ def format_dataset_chatml(sample):
 
 def process_dataset(data):
     dataset = Dataset.from_list(data)
-    dataset_chatml = dataset.map(format_dataset_chatml).map(lambda x: {"text": x["text"]})
-    return dataset_chatml
+    dataset_chatml = dataset.map(format_dataset_chatml)
+    return dataset_chatml.remove_columns(['messages'])
 
 def save_and_upload(dataset, filename, s3_client):
     local_path = Path(data_dir) / filename
