@@ -42,27 +42,26 @@ class CustomDataset(TorchDataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        input_text = item.get('input', item.get('text', ''))
-        output_text = item.get('output', '')
         
-        full_text = f"{input_text}\n{output_text}".strip()
-        
+        if isinstance(item['text'], dict) and 'text' in item['text']:
+            full_text = item['text']['text'].strip()
+        else:
+            full_text = item['text'].strip()
+
         encoding = self.tokenizer(full_text,
                                   truncation=True,
                                   max_length=self.max_length,
                                   padding="max_length",
                                   return_tensors="pt")
-        
+
         input_ids = encoding["input_ids"].squeeze()
         attention_mask = encoding["attention_mask"].squeeze()
-        
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": input_ids.clone()
         }
-
-# Function to find all linear layer names in the model
 def find_all_linear_names(model):
     lora_module_names = set()
     for name, module in model.named_modules():
@@ -74,7 +73,7 @@ def find_all_linear_names(model):
         lora_module_names.remove("lm_head")
     return list(lora_module_names)
 
-# Function to create a PEFT (Parameter-Efficient Fine-Tuning) model
+# Function to create a PEFT model
 def create_peft_model(model, gradient_checkpointing=True, bf16=True):
     from peft import (
         get_peft_model,
@@ -121,7 +120,6 @@ def create_peft_model(model, gradient_checkpointing=True, bf16=True):
     model.print_trainable_parameters()
     return model
 
-# Function to manually load dataset from JSON files
 def load_dataset_manually(dataset_path):
     print(f"Attempting to load dataset from: {dataset_path}")
     try:
@@ -131,16 +129,17 @@ def load_dataset_manually(dataset_path):
         def load_json_file(file_path):
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return Dataset.from_list(data)
+            return Dataset.from_list(data)  
         
         dataset = DatasetDict({
             'train': load_json_file(train_file),
-            'test': load_json_file(test_file)
+            'test': load_json_file(test_file) if os.path.exists(test_file) else None
         })
         
         print(f"Loaded dataset with splits: {dataset.keys()}")
         for split, data in dataset.items():
-            print(f"{split} split has {len(data)} samples")
+            if data is not None:
+                print(f"{split} split has {len(data)} samples")
         
         return dataset
     except Exception as e:
@@ -171,86 +170,78 @@ def training_function(script_args, training_args):
         
         raw_dataset = dataset_dict['train']
         print(f"Using 'train' split with {len(raw_dataset)} samples")
-        
+
         if len(raw_dataset) == 0:
             raise ValueError("Training dataset is empty")
-        
+
+        print(f"Dataset info: {raw_dataset}")
+
+        print("First few samples of the dataset:")
+        for i, sample in enumerate(raw_dataset.select(range(min(5, len(raw_dataset))))):
+            print(f"Sample {i}:")
+            print(json.dumps(sample, indent=2))
+            print()
+
+        tokenizer = AutoTokenizer.from_pretrained(script_args.model_id, padding_side="left")
+        tokenizer.pad_token = tokenizer.eos_token
+
+        train_dataset = CustomDataset(raw_dataset, tokenizer, max_length=512)
+        test_dataset = CustomDataset(dataset_dict['test'], tokenizer, max_length=512) if 'test' in dataset_dict else None
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+
+        model = AutoModelForCausalLM.from_pretrained(
+            script_args.model_id,
+            device_map="auto",
+            quantization_config=bnb_config,
+            config=config,
+            trust_remote_code=script_args.trust_remote_code
+        )
+
+        model = create_peft_model(
+            model, gradient_checkpointing=training_args.gradient_checkpointing, bf16=training_args.bf16
+        )
+
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=test_dataset,
+            data_collator=default_data_collator,
+        )
+
+        trainer.train()
+
+        sagemaker_save_dir = "/opt/ml/model/"
+        if script_args.merge_adapters:
+            trainer.model.save_pretrained(training_args.output_dir, safe_serialization=False)
+            del model
+            del trainer
+            torch.cuda.empty_cache()
+
+            from peft import AutoPeftModelForCausalLM
+
+            model = AutoPeftModelForCausalLM.from_pretrained(
+                training_args.output_dir,
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.float16,
+            )
+            model = model.merge_and_unload()
+            model.save_pretrained(sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB")
+        else:
+            trainer.model.save_pretrained(sagemaker_save_dir, safe_serialization=True)
+
+        tokenizer.save_pretrained(sagemaker_save_dir)
+
     except Exception as e:
-        print(f"Error loading or processing dataset: {str(e)}")
+        print(f"An error occurred during training: {str(e)}")
         raise
 
-    print(f"Dataset info: {raw_dataset}")
-    
-    print("First few samples of the dataset:")
-    for i, sample in enumerate(raw_dataset.select(range(min(5, len(raw_dataset))))):
-        print(f"Sample {i}:")
-        print(json.dumps(sample, indent=2))
-        print()
-
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(script_args.model_id, padding_side="left")
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # Create custom dataset
-    dataset = CustomDataset(raw_dataset, tokenizer, max_length=512)  # Adjust max_length as needed
-
-    # Configure quantization
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
-    # Load pre-trained model
-    model = AutoModelForCausalLM.from_pretrained(
-        script_args.model_id,
-        device_map="auto",
-        quantization_config=bnb_config,
-        config=config,
-        trust_remote_code=script_args.trust_remote_code
-    )
-
-    # Create PEFT model
-    model = create_peft_model(
-        model, gradient_checkpointing=training_args.gradient_checkpointing, bf16=training_args.bf16
-    )
-
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset['train'],
-        eval_dataset=dataset['test'],
-        data_collator=default_data_collator,
-    )
-
-    # Start training
-    trainer.train()
-
-    # Save the model
-    sagemaker_save_dir = "/opt/ml/model/"
-    if script_args.merge_adapters:
-        trainer.model.save_pretrained(training_args.output_dir, safe_serialization=False)
-        del model
-        del trainer
-        torch.cuda.empty_cache()
-
-        from peft import AutoPeftModelForCausalLM
-
-        model = AutoPeftModelForCausalLM.from_pretrained(
-            training_args.output_dir,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float16,
-        )
-        model = model.merge_and_unload()
-        model.save_pretrained(sagemaker_save_dir, safe_serialization=True, max_shard_size="2GB")
-    else:
-        trainer.model.save_pretrained(sagemaker_save_dir, safe_serialization=True)
-
-    tokenizer.save_pretrained(sagemaker_save_dir)
-
-# Define script arguments
 @dataclass
 class ScriptArguments:
     model_id: str = field(
@@ -276,22 +267,18 @@ class ScriptArguments:
         default=False,
     )
 
-# Main function
 def main():
-    # Parse arguments
     parser = HfArgumentParser([ScriptArguments, TrainingArguments])
     script_args, training_args = parser.parse_args_into_dataclasses()
     training_args.bf16 = False
     training_args.fp16 = True
     set_seed(training_args.seed)
 
-    # Login to Hugging Face Hub if token is provided
     token = os.environ.get("HF_TOKEN") or script_args.hf_token
     if token:
         print(f"Logging into the Hugging Face Hub with token {token[:10]}...")
         login(token=token)
 
-    # Start training
     training_function(script_args, training_args)
 
 if __name__ == "__main__":
