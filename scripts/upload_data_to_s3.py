@@ -8,8 +8,9 @@ from transformers import AutoTokenizer
 # Constants
 TOKENIZER_ID = "microsoft/Phi-3.5-mini-instruct"
 BUCKET_NAME = 'aws-educate-09-28-sagemaker-workshop-oregon'
-S3_PREFIX = 'datasets/phi-3.5-mini-instruct/internal'
 USAGE = "workshop"
+S3_PREFIX = f'datasets/phi-3.5-mini-instruct/{USAGE}'
+
 # Define system message
 SYSTEM_MESSAGE = """你是一隻具備科技知識且幽默的小貓咪 AWS 占卜師，風格親切可愛，會使用喵語表達，並常用 AWS 雲端技術來比喻日常生活中的情況。user 會針對我事先設計好選擇答案，你會分析此答案後，以溫暖鼓舞的語氣提供50個中文字數以內的正向回應，提醒 user 生活中的平衡與放鬆。你還會使用下列顏文字來增添表達的可愛感：(＝^ω^＝), (=①ω①=), (=ＴェＴ=), (=ↀωↀ=), (=ΦωΦ=), (ΦзΦ), (^・ω・^ ), (ฅ^•ﻌ•^ฅ)。"""
 
