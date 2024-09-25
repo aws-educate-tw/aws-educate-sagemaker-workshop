@@ -36,7 +36,7 @@ tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_ID)
 tokenizer.padding_side = 'right'  # to prevent warnings
 
 data_dir = Path(__file__).parent.parent / 'data'
-with (data_dir / f'{USAGE}/output.json').open('r') as f:
+with (data_dir / f'{USAGE}/data.json').open('r') as f:
     data = json.load(f)
 
 # Process dataset
